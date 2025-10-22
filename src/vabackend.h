@@ -7,6 +7,7 @@
 #include <EGL/eglext.h>
 #include <stdbool.h>
 #include <va/va_drmcommon.h>
+#include "nvEncodeAPI.h"
 
 #include <pthread.h>
 #include "list.h"
@@ -27,6 +28,7 @@ typedef enum
 {
     OBJECT_TYPE_CONFIG,
     OBJECT_TYPE_CONTEXT,
+    OBJECT_TYPE_ENCODE_CONTEXT,
     OBJECT_TYPE_SURFACE,
     OBJECT_TYPE_BUFFER,
     OBJECT_TYPE_IMAGE
@@ -125,10 +127,12 @@ typedef struct {
     void (*destroyAllBackingImage)(struct _NVDriver *drv);
 } NVBackend;
 
+
 typedef struct _NVDriver
 {
     CudaFunctions           *cu;
     CuvidFunctions          *cv;
+    NV_ENCODE_API_FUNCTION_LIST *nvenc;
     CUcontext               cudaContext;
     CUvideoctxlock          vidLock;
     Array/*<Object>*/       objects;
@@ -166,6 +170,7 @@ typedef struct _NVContext
     uint32_t            width;
     uint32_t            height;
     CUvideodecoder      decoder;
+    void                *nvencEncoder;  // NVENC encoder handle
     NVSurface           *renderTarget;
     void                *lastSliceParams;
     unsigned int        lastSliceParamsCount;
@@ -184,6 +189,12 @@ typedef struct _NVContext
     pthread_mutex_t     surfaceCreationMutex;
     int                 surfaceCount;
     bool                firstKeyframeValid;
+    // Encoding-specific fields
+    bool                isEncoding;
+    NV_ENC_INITIALIZE_PARAMS encInitParams;
+    NV_ENC_CONFIG       encConfig;
+    GUID                encGUID;
+    GUID                presetGUID;
 } NVContext;
 
 typedef struct
@@ -198,14 +209,20 @@ typedef struct
 
 typedef void (*HandlerFunc)(NVContext*, NVBuffer* , CUVIDPICPARAMS*);
 typedef cudaVideoCodec (*ComputeCudaCodec)(VAProfile);
+typedef GUID (*ComputeNvencGUID)(VAProfile);
+typedef void (*EncodeHandlerFunc)(NVContext*, NVBuffer*, NV_ENC_PIC_PARAMS*);
 
 //padding/alignment is very important to this structure as it's placed in it's own section
 //in the executable.
 struct _NVCodec {
     ComputeCudaCodec    computeCudaCodec;
+    ComputeNvencGUID    computeNvencGUID;
     HandlerFunc         handlers[VABufferTypeMax];
+    EncodeHandlerFunc  encodeHandlers[VABufferTypeMax];
     int                 supportedProfileCount;
     const VAProfile     *supportedProfiles;
+    int                 supportedEncodeProfileCount;
+    const VAProfile     *supportedEncodeProfiles;
 };
 
 typedef struct _NVCodec NVCodec;
@@ -245,5 +262,19 @@ void logger(const char *filename, const char *function, int line, const char *ms
     __attribute__((section("nvd_disabled_codecs"))) \
     __attribute__((aligned(__alignof__(NVCodec)))) \
     NVCodec name
+
+#define DECLARE_ENCODE_CODEC(name) \
+    __attribute__((used)) \
+    __attribute__((retain)) \
+    __attribute__((section("nve_codecs"))) \
+    __attribute__((aligned(__alignof__(NVCodec)))) \
+    NVCodec name
+
+// NVENC helper functions
+bool checkNvencErrors(NVENCSTATUS err, const char *file, const char *function, const int line);
+#define CHECK_NVENC_RESULT(err) checkNvencErrors(err, __FILE__, __func__, __LINE__)
+#define CHECK_NVENC_RESULT_RETURN(err, ret) if (checkNvencErrors(err, __FILE__, __func__, __LINE__)) { return ret; }
+
+// NVENC GUID definitions are available from nvEncodeAPI.h
 
 #endif // VABACKEND_H

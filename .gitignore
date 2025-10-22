@@ -11,3 +11,8 @@ va-api-nvidia.files
 va-api-nvidia.includes
 meson.build.user
 .idea
+.cache
+.vscode
+builddir
+build
+*.bak

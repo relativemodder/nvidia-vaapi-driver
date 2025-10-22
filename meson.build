@@ -55,6 +55,7 @@ sources = [
     'src/direct/direct-export-buf.c',
     'src/direct/nv-driver.c',
     'src/h264.c',
+    'src/h264_encode.c',
     'src/hevc.c',
     'src/jpeg.c',
     'src/mpeg2.c',

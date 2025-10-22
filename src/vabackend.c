@@ -67,6 +67,8 @@ static uint32_t max_instances;
 
 static CudaFunctions *cu;
 static CuvidFunctions *cv;
+static NV_ENCODE_API_FUNCTION_LIST *nvenc;
+static NvencFunctions *nvenc_funcs;
 
 extern const NVCodec __start_nvd_codecs[];
 extern const NVCodec __stop_nvd_codecs[];
@@ -164,12 +166,46 @@ static void init() {
         return;
     }
 
+    // Initialize NVENC functions using ffnvcodec dynamic loader
+    int nvenc_ret = nvenc_load_functions(&nvenc_funcs, NULL);
+    if (nvenc_ret != 0) {
+        LOG("Failed to load NVENC functions: %d", nvenc_ret);
+        nvenc = NULL;
+        // Don't return here - continue without NVENC support
+        LOG("Continuing without NVENC support");
+    } else {
+        // Create NVENC function list
+        nvenc = calloc(1, sizeof(NV_ENCODE_API_FUNCTION_LIST));
+        if (nvenc == NULL) {
+            LOG("Failed to allocate NVENC function list");
+            nvenc_free_functions(&nvenc_funcs);
+            nvenc = NULL;
+        } else {
+            nvenc->version = NV_ENCODE_API_FUNCTION_LIST_VER;
+            NVENCSTATUS nvenc_init_ret = nvenc_funcs->NvEncodeAPICreateInstance(nvenc);
+            if (nvenc_init_ret != NV_ENC_SUCCESS) {
+                LOG("Failed to initialize NVENC: %d", nvenc_init_ret);
+                free(nvenc);
+                nvenc_free_functions(&nvenc_funcs);
+                nvenc = NULL;
+                LOG("Continuing without NVENC support");
+            }
+        }
+    }
+
     //Not really much we can do here to abort the loading of the library
     CHECK_CUDA_RESULT(cu->cuInit(0));
 }
 
 __attribute__ ((destructor))
 static void cleanup() {
+    if (nvenc != NULL) {
+        free(nvenc);
+        nvenc = NULL;
+    }
+    if (nvenc_funcs != NULL) {
+        nvenc_free_functions(&nvenc_funcs);
+    }
     if (cv != NULL) {
         cuvid_free_functions(&cv);
     }
@@ -604,9 +640,24 @@ static VAStatus nvQueryConfigEntrypoints(
         int *num_entrypoints			/* out */
     )
 {
-    entrypoint_list[0] = VAEntrypointVLD;
-    *num_entrypoints = 1;
-
+    NVDriver *drv = (NVDriver*) ctx->pDriverData;
+    int count = 0;
+    
+    // Always support VLD (decoding)
+    entrypoint_list[count++] = VAEntrypointVLD;
+    
+    // Check if we support encoding for this profile (only if NVENC is available)
+    if (drv->nvenc != NULL && 
+        (profile == VAProfileH264ConstrainedBaseline || 
+         profile == VAProfileH264Main || 
+         profile == VAProfileH264High ||
+         profile == VAProfileHEVCMain ||
+         profile == VAProfileHEVCMain10)) {
+        entrypoint_list[count++] = VAEntrypointEncSlice;
+        entrypoint_list[count++] = VAEntrypointEncPicture;
+    }
+    
+    *num_entrypoints = count;
     return VA_STATUS_SUCCESS;
 }
 
@@ -699,7 +750,9 @@ static VAStatus nvCreateConfig(
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
     }
 
-    if (entrypoint != VAEntrypointVLD) {
+    if (entrypoint != VAEntrypointVLD && 
+        entrypoint != VAEntrypointEncSlice && 
+        entrypoint != VAEntrypointEncPicture) {
         LOG("Entrypoint not supported: %d", entrypoint);
         return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
     }
@@ -2292,12 +2345,18 @@ VAStatus __vaDriverInit_1_0(VADriverContextP ctx) {
     if (cu == NULL || cv == NULL) {
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
+    
+    // NVENC is optional - we can continue without it
+    if (nvenc == NULL) {
+        LOG("NVENC not available - encoding will not be supported");
+    }
 
     NVDriver *drv = (NVDriver*) calloc(1, sizeof(NVDriver));
     ctx->pDriverData = drv;
 
     drv->cu = cu;
     drv->cv = cv;
+    drv->nvenc = nvenc;
     drv->useCorrectNV12Format = true;
     drv->cudaGpuId = gpu;
     //make sure that we want the default GPU, and that a DRM fd that we care about is passed in
